@@ -19,7 +19,6 @@
 #include "abilityms_log.h"
 #include "adapter.h"
 #include "cmsis_os2.h"
-#include "los_task.h"
 #include "samgr_lite.h"
 #include "securec.h"
 #include "want.h"
@@ -102,7 +101,7 @@ int32_t AbilityMsClient::StartAbility(const Want *want) const
         HILOG_INFO(HILOG_MODULE_APP, "start ability with no data");
     }
     data->want = info;
-    data->curTask = LOS_CurTaskIDGet();
+    data->curTask = osThreadGetId();
     Request request = {
         .msgId = START_ABILITY,
         .len = sizeof(StartAbilityData),

@@ -38,7 +38,7 @@ public:
 
     AbilityRecord *Get(const char *bundleName) const;
 
-    AbilityRecord *GetByTaskId(uint32_t taskId) const;
+    AbilityRecord *GetByTaskId(osThreadId_t taskId) const;
 
     void Erase(uint16_t token);
 

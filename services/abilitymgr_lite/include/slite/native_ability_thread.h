@@ -32,14 +32,19 @@ public:
 
     osMessageQueueId_t GetMessageQueueId() const override;
 
-    UINT32 GetAppTaskId() const override;
+    osThreadId_t GetAppTaskId() const override;
 
     static void Reset();
 
-    static void NativeAppTaskHandler(UINT32 uwArg);
+    static void NativeAppTaskHandler(void *argument);
 private:
+    static int32_t CreateAppTask(bool &needUnlockKernel);
+
+    static void ProcessMessage(AbilityThread *abilityThread, AbilityThread *&defaultAbilityThread,
+        SliteAbilityInnerMsg &innerMsg);
+
     static osMessageQueueId_t nativeQueueId_;
-    static UINT32 nativeTaskId_;
+    static osThreadId_t nativeTaskId_;
     static SliteAbility *nativeAbility_;
 };
 }

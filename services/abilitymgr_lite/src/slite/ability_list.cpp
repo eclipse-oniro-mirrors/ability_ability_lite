@@ -83,7 +83,7 @@ AbilityRecord *AbilityList::Get(const char *bundleName) const
     return nullptr;
 }
 
-AbilityRecord *AbilityList::GetByTaskId(uint32_t taskId) const
+AbilityRecord *AbilityList::GetByTaskId(osThreadId_t taskId) const
 {
     AbilityLockGuard locker(abilityListMutex_);
     for (auto node = abilityList_.Begin(); node != abilityList_.End(); node = node->next_) {
