@@ -21,12 +21,10 @@
 #include "adapter.h"
 #include "js_ability.h"
 #include "js_async_work.h"
-#include "los_task.h"
 #include "slite_ability_loader.h"
 
 namespace OHOS {
 namespace AbilitySlite {
-constexpr uint16_t APP_TASK_PRI = 25;
 constexpr uint32_t QUEUE_LENGTH = 32;
 static char g_jsAppTask[] = "AppTask";
 
@@ -40,6 +38,40 @@ JsAbilityThread::~JsAbilityThread()
         osMessageQueueDelete(messageQueueId_);
         messageQueueId_ = nullptr;
     }
+}
+
+int32_t JsAbilityThread::CreateAppTask(bool &needUnlockKernel)
+{
+    needUnlockKernel = false;
+    messageQueueId_ = osMessageQueueNew(QUEUE_LENGTH, sizeof(SliteAbilityInnerMsg), nullptr);
+    if (messageQueueId_ == nullptr) {
+        HILOG_ERROR(HILOG_MODULE_AAFWK, "JsAbilityThread init fail: messageQueueId is null");
+        return MEMORY_MALLOC_ERROR;
+    }
+
+    osThreadAttr_t threadAttr = {};
+    threadAttr.name = g_jsAppTask;
+    threadAttr.stack_size = TASK_STACK_SIZE;
+    threadAttr.priority = osPriorityNormal4;
+    int32_t kernelLockState = osKernelLock();
+    if (kernelLockState < 0) {
+        (void)osMessageQueueDelete(messageQueueId_);
+        messageQueueId_ = nullptr;
+        return CREATE_APPTASK_ERROR;
+    }
+    needUnlockKernel = (kernelLockState == 0);
+    appTaskId_ = osThreadNew(JsAbilityThread::AppTaskHandler, messageQueueId_, &threadAttr);
+    if (appTaskId_ == nullptr) {
+        HILOG_ERROR(HILOG_MODULE_AAFWK, "JsAbilityThread init fail: osThreadNew failed");
+        (void)osMessageQueueDelete(messageQueueId_);
+        messageQueueId_ = nullptr;
+        if (needUnlockKernel) {
+            (void)osKernelUnlock();
+            needUnlockKernel = false;
+        }
+        return CREATE_APPTASK_ERROR;
+    }
+    return ERR_OK;
 }
 
 int32_t JsAbilityThread::InitAbilityThread(const AbilityRecord *abilityRecord)
@@ -57,36 +89,30 @@ int32_t JsAbilityThread::InitAbilityThread(const AbilityRecord *abilityRecord)
         return PARAM_CHECK_ERROR;
     }
 
-    messageQueueId_ = osMessageQueueNew(QUEUE_LENGTH, sizeof(SliteAbilityInnerMsg), nullptr);
-    if (messageQueueId_ == nullptr) {
-        HILOG_ERROR(HILOG_MODULE_AAFWK, "JsAbilityThread init fail: messageQueueId is null");
-        return MEMORY_MALLOC_ERROR;
-    }
-
-    TSK_INIT_PARAM_S stTskInitParam = { nullptr };
-    LOS_TaskLock();
-    stTskInitParam.pfnTaskEntry = (TSK_ENTRY_FUNC) (JsAbilityThread::AppTaskHandler);
-    stTskInitParam.uwStackSize = TASK_STACK_SIZE;
-    stTskInitParam.usTaskPrio = OS_TASK_PRIORITY_LOWEST - APP_TASK_PRI;
-    stTskInitParam.pcName = g_jsAppTask;
-    stTskInitParam.uwResved = 0;
-    stTskInitParam.uwArg = reinterpret_cast<uintptr_t>(messageQueueId_);
-    uint32_t ret = LOS_TaskCreate(&appTaskId_, &stTskInitParam);
-    if (ret != LOS_OK) {
-        HILOG_ERROR(HILOG_MODULE_AAFWK, "JsAbilityThread init fail: LOS_TaskCreate ret %{public}d", ret);
-        osMessageQueueDelete(messageQueueId_);
-        LOS_TaskUnlock();
-        return CREATE_APPTASK_ERROR;
+    bool needUnlockKernel = false;
+    int32_t ret = CreateAppTask(needUnlockKernel);
+    if (ret != ERR_OK) {
+        return ret;
     }
     state_ = AbilityThreadState::ABILITY_THREAD_INITIALIZED;
     ability_ = SliteAbilityLoader::GetInstance().CreateAbility(SliteAbilityType::JS_ABILITY, abilityRecord->appName);
     if (ability_ == nullptr) {
         HILOG_INFO(HILOG_MODULE_AAFWK, "JsAbility create fail");
+        (void)osThreadTerminate(appTaskId_);
+        appTaskId_ = nullptr;
+        (void)osMessageQueueDelete(messageQueueId_);
+        messageQueueId_ = nullptr;
+        state_ = AbilityThreadState::ABILITY_THREAD_UNINITIALIZED;
+        if (needUnlockKernel) {
+            (void)osKernelUnlock();
+        }
         return MEMORY_MALLOC_ERROR;
     }
     ability_->SetToken(abilityRecord->token);
     ACELite::JsAsyncWork::SetAppQueueHandler(messageQueueId_);
-    LOS_TaskUnlock();
+    if (needUnlockKernel) {
+        (void)osKernelUnlock();
+    }
     HILOG_INFO(HILOG_MODULE_AAFWK, "JsAbilityThread init done");
     return ERR_OK;
 }
@@ -99,9 +125,9 @@ int32_t JsAbilityThread::ReleaseAbilityThread()
         return PARAM_CHECK_ERROR;
     }
     state_ = AbilityThreadState::ABILITY_THREAD_RELEASED;
-    LOS_TaskDelete(appTaskId_);
-    appTaskId_ = 0;
-    osMessageQueueDelete(messageQueueId_);
+    (void)osThreadTerminate(appTaskId_);
+    appTaskId_ = nullptr;
+    (void)osMessageQueueDelete(messageQueueId_);
     messageQueueId_ = nullptr;
     return ERR_OK;
 }
@@ -111,14 +137,48 @@ osMessageQueueId_t JsAbilityThread::GetMessageQueueId() const
     return messageQueueId_;
 }
 
-UINT32 JsAbilityThread::GetAppTaskId() const
+osThreadId_t JsAbilityThread::GetAppTaskId() const
 {
     return appTaskId_;
 }
 
-void JsAbilityThread::AppTaskHandler(UINT32 uwArg)
+bool JsAbilityThread::ProcessMessage(AbilityThread *abilityThread, AbilityThread *&defaultAbilityThread,
+    SliteAbilityInnerMsg &innerMsg)
 {
-    auto messageQueueId = reinterpret_cast<osMessageQueueId_t>(uwArg);
+    switch (innerMsg.msgId) {
+        case SliteAbilityMsgId::CREATE:
+            defaultAbilityThread = abilityThread;
+            abilityThread->HandleCreate(innerMsg.want);
+            abilityThread->HandleRestore(innerMsg.abilitySavedData);
+            ClearWant(innerMsg.want);
+            AdapterFree(innerMsg.want);
+            innerMsg.want = nullptr;
+            break;
+        case SliteAbilityMsgId::FOREGROUND:
+            abilityThread->HandleForeground(innerMsg.want);
+            ClearWant(innerMsg.want);
+            AdapterFree(innerMsg.want);
+            innerMsg.want = nullptr;
+            break;
+        case SliteAbilityMsgId::BACKGROUND:
+            abilityThread->HandleBackground();
+            break;
+        case SliteAbilityMsgId::DESTROY:
+            abilityThread->HandleSave(innerMsg.abilitySavedData);
+            abilityThread->HandleDestroy();
+            return true;
+        default:
+            if (abilityThread->ability_ != nullptr) {
+                abilityThread->ability_->HandleExtraMessage(innerMsg);
+            }
+            break;
+    }
+    return false;
+}
+
+void JsAbilityThread::AppTaskHandler(void *argument)
+{
+    auto messageQueueId = static_cast<osMessageQueueId_t>(argument);
     if (messageQueueId == nullptr) {
         return;
     }
@@ -139,36 +199,11 @@ void JsAbilityThread::AppTaskHandler(UINT32 uwArg)
             abilityThread = defaultAbilityThread;
         }
         LP_TaskBegin();
-        switch (innerMsg.msgId) {
-            case SliteAbilityMsgId::CREATE:
-                defaultAbilityThread = abilityThread;
-                abilityThread->HandleCreate(innerMsg.want);
-                abilityThread->HandleRestore(innerMsg.abilitySavedData);
-                ClearWant(innerMsg.want);
-                AdapterFree(innerMsg.want);
-                innerMsg.want = nullptr;
-                break;
-            case SliteAbilityMsgId::FOREGROUND:
-                abilityThread->HandleForeground(innerMsg.want);
-                ClearWant(innerMsg.want);
-                AdapterFree(innerMsg.want);
-                innerMsg.want = nullptr;
-                break;
-            case SliteAbilityMsgId::BACKGROUND:
-                abilityThread->HandleBackground();
-                break;
-            case SliteAbilityMsgId::DESTROY:
-                abilityThread->HandleSave(innerMsg.abilitySavedData);
-                abilityThread->HandleDestroy();
-                LP_TaskEnd();
-                return; // here exit the loop, and abort all messages afterwards
-            default:
-                if (abilityThread->ability_ != nullptr) {
-                    abilityThread->ability_->HandleExtraMessage(innerMsg);
-                }
-                break;
-        }
+        bool shouldExit = ProcessMessage(abilityThread, defaultAbilityThread, innerMsg);
         LP_TaskEnd();
+        if (shouldExit) {
+            return; // here exit the loop, and abort all messages afterwards
+        }
     }
 }
 } // namespace AbilitySlite

@@ -23,17 +23,15 @@
 #include "adapter.h"
 #include "ability_thread.h"
 #include "abilityms_log.h"
-#include "los_task.h"
 #include "slite_ability_loader.h"
 
 namespace OHOS {
 namespace AbilitySlite {
 static char g_NativeAppTask[] = "NativeAppTask";
-constexpr int32_t APP_TASK_PRI = 25;
 constexpr int32_t QUEUE_LENGTH = 32;
 
 osMessageQueueId_t NativeAbilityThread::nativeQueueId_ = nullptr;
-UINT32 NativeAbilityThread::nativeTaskId_ = UINT32_MAX;
+osThreadId_t NativeAbilityThread::nativeTaskId_ = nullptr;
 SliteAbility *NativeAbilityThread::nativeAbility_ = nullptr;
 
 NativeAbilityThread::NativeAbilityThread() = default;
@@ -54,6 +52,46 @@ NativeAbilityThread::~NativeAbilityThread()
 #endif
 }
 
+int32_t NativeAbilityThread::CreateAppTask(bool &needUnlockKernel)
+{
+    needUnlockKernel = false;
+    if (nativeQueueId_ == nullptr) {
+        nativeQueueId_ = osMessageQueueNew(QUEUE_LENGTH, sizeof(SliteAbilityInnerMsg), nullptr);
+    }
+    if (nativeQueueId_ == nullptr) {
+        HILOG_ERROR(HILOG_MODULE_AAFWK, "NativeAbilityThread init fail: messageQueueId is null");
+        return MEMORY_MALLOC_ERROR;
+    }
+
+    HILOG_INFO(HILOG_MODULE_AAFWK, "CreateAppTask.");
+    if (nativeTaskId_ != nullptr) {
+        return ERR_OK;
+    }
+    osThreadAttr_t threadAttr = {};
+    threadAttr.name = g_NativeAppTask;
+    threadAttr.stack_size = NATIVE_TASK_STACK_SIZE;
+    threadAttr.priority = osPriorityNormal4;
+    int32_t kernelLockState = osKernelLock();
+    if (kernelLockState < 0) {
+        (void)osMessageQueueDelete(nativeQueueId_);
+        nativeQueueId_ = nullptr;
+        return CREATE_APPTASK_ERROR;
+    }
+    needUnlockKernel = (kernelLockState == 0);
+    nativeTaskId_ = osThreadNew(NativeAbilityThread::NativeAppTaskHandler, nativeQueueId_, &threadAttr);
+    if (nativeTaskId_ == nullptr) {
+        HILOG_ERROR(HILOG_MODULE_AAFWK, "NativeAbilityThread init fail: osThreadNew failed");
+        (void)osMessageQueueDelete(nativeQueueId_);
+        nativeQueueId_ = nullptr;
+        if (needUnlockKernel) {
+            (void)osKernelUnlock();
+            needUnlockKernel = false;
+        }
+        return CREATE_APPTASK_ERROR;
+    }
+    return ERR_OK;
+}
+
 int32_t NativeAbilityThread::InitAbilityThread(const AbilityRecord *abilityRecord)
 {
     if (abilityRecord == nullptr) {
@@ -69,31 +107,10 @@ int32_t NativeAbilityThread::InitAbilityThread(const AbilityRecord *abilityRecor
         return PARAM_CHECK_ERROR;
     }
 
-    if (nativeQueueId_ == nullptr) {
-        nativeQueueId_ = osMessageQueueNew(QUEUE_LENGTH, sizeof(SliteAbilityInnerMsg), nullptr);
-    }
-    if (nativeQueueId_ == nullptr) {
-        HILOG_ERROR(HILOG_MODULE_AAFWK, "NativeAbilityThread init fail: messageQueueId is null");
-        return MEMORY_MALLOC_ERROR;
-    }
-
-    HILOG_INFO(HILOG_MODULE_AAFWK, "CreateAppTask.");
-    if (nativeTaskId_ == UINT32_MAX) {
-        TSK_INIT_PARAM_S stTskInitParam = { 0 };
-        LOS_TaskLock();
-        stTskInitParam.pfnTaskEntry = (TSK_ENTRY_FUNC) (NativeAbilityThread::NativeAppTaskHandler);
-        stTskInitParam.uwStackSize = NATIVE_TASK_STACK_SIZE;
-        stTskInitParam.usTaskPrio = OS_TASK_PRIORITY_LOWEST - APP_TASK_PRI;
-        stTskInitParam.pcName = g_NativeAppTask;
-        stTskInitParam.uwResved = 0;
-        stTskInitParam.uwArg = reinterpret_cast<UINT32>((uintptr_t) nativeQueueId_);
-        uint32_t ret = LOS_TaskCreate(&nativeTaskId_, &stTskInitParam);
-        if (ret != LOS_OK) {
-            HILOG_ERROR(HILOG_MODULE_AAFWK, "NativeAbilityThread init fail: LOS_TaskCreate ret %{public}d", ret);
-            osMessageQueueDelete(nativeQueueId_);
-            LOS_TaskUnlock();
-            return CREATE_APPTASK_ERROR;
-        }
+    bool needUnlockKernel = false;
+    int32_t ret = CreateAppTask(needUnlockKernel);
+    if (ret != ERR_OK) {
+        return ret;
     }
 
     state_ = AbilityThreadState::ABILITY_THREAD_INITIALIZED;
@@ -114,11 +131,15 @@ int32_t NativeAbilityThread::InitAbilityThread(const AbilityRecord *abilityRecor
 #endif
     if (ability_ == nullptr) {
         HILOG_INFO(HILOG_MODULE_AAFWK, "NativeAbility create fail");
-        LOS_TaskUnlock();
+        if (needUnlockKernel) {
+            (void)osKernelUnlock();
+        }
         return MEMORY_MALLOC_ERROR;
     }
     ability_->SetToken(abilityRecord->token);
-    LOS_TaskUnlock();
+    if (needUnlockKernel) {
+        (void)osKernelUnlock();
+    }
     HILOG_INFO(HILOG_MODULE_AAFWK, "NativeAbilityThread init done");
     return ERR_OK;
 }
@@ -137,7 +158,7 @@ osMessageQueueId_t NativeAbilityThread::GetMessageQueueId() const
     return nativeQueueId_;
 }
 
-UINT32 NativeAbilityThread::GetAppTaskId() const
+osThreadId_t NativeAbilityThread::GetAppTaskId() const
 {
     return nativeTaskId_;
 }
@@ -148,13 +169,46 @@ void NativeAbilityThread::Reset()
         osMessageQueueDelete(nativeQueueId_);
     }
     nativeQueueId_ = nullptr;
-    nativeTaskId_ = 0;
+    nativeTaskId_ = nullptr;
     nativeAbility_ = nullptr;
 }
 
-void NativeAbilityThread::NativeAppTaskHandler(UINT32 uwArg)
+void NativeAbilityThread::ProcessMessage(AbilityThread *abilityThread, AbilityThread *&defaultAbilityThread,
+    SliteAbilityInnerMsg &innerMsg)
 {
-    auto messageQueueId = reinterpret_cast<osMessageQueueId_t>(uwArg);
+    switch (innerMsg.msgId) {
+        case SliteAbilityMsgId::CREATE:
+            defaultAbilityThread = abilityThread;
+            abilityThread->HandleCreate(innerMsg.want);
+            abilityThread->HandleRestore(innerMsg.abilitySavedData);
+            ClearWant(innerMsg.want);
+            AdapterFree(innerMsg.want);
+            innerMsg.want = nullptr;
+            break;
+        case SliteAbilityMsgId::FOREGROUND:
+            abilityThread->HandleForeground(innerMsg.want);
+            ClearWant(innerMsg.want);
+            AdapterFree(innerMsg.want);
+            innerMsg.want = nullptr;
+            break;
+        case SliteAbilityMsgId::BACKGROUND:
+            abilityThread->HandleBackground();
+            break;
+        case SliteAbilityMsgId::DESTROY:
+            abilityThread->HandleSave(innerMsg.abilitySavedData);
+            abilityThread->HandleDestroy();
+            break; // this task will be kept alive
+        default:
+            if (abilityThread->ability_ != nullptr) {
+                abilityThread->ability_->HandleExtraMessage(innerMsg);
+            }
+            break;
+    }
+}
+
+void NativeAbilityThread::NativeAppTaskHandler(void *argument)
+{
+    auto messageQueueId = static_cast<osMessageQueueId_t>(argument);
     if (messageQueueId == nullptr) {
         return;
     }
@@ -175,34 +229,7 @@ void NativeAbilityThread::NativeAppTaskHandler(UINT32 uwArg)
             abilityThread = defaultAbilityThread;
         }
         LP_TaskBegin();
-        switch (innerMsg.msgId) {
-            case SliteAbilityMsgId::CREATE:
-                defaultAbilityThread = abilityThread;
-                abilityThread->HandleCreate(innerMsg.want);
-                abilityThread->HandleRestore(innerMsg.abilitySavedData);
-                ClearWant(innerMsg.want);
-                AdapterFree(innerMsg.want);
-                innerMsg.want = nullptr;
-                break;
-            case SliteAbilityMsgId::FOREGROUND:
-                abilityThread->HandleForeground(innerMsg.want);
-                ClearWant(innerMsg.want);
-                AdapterFree(innerMsg.want);
-                innerMsg.want = nullptr;
-                break;
-            case SliteAbilityMsgId::BACKGROUND:
-                abilityThread->HandleBackground();
-                break;
-            case SliteAbilityMsgId::DESTROY:
-                abilityThread->HandleSave(innerMsg.abilitySavedData);
-                abilityThread->HandleDestroy();
-                break; // this task will be kept alive
-            default:
-                if (abilityThread->ability_ != nullptr) {
-                    abilityThread->ability_->HandleExtraMessage(innerMsg);
-                }
-                break;
-        }
+        ProcessMessage(abilityThread, defaultAbilityThread, innerMsg);
         LP_TaskEnd();
     }
 }
