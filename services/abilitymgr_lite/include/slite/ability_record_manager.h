@@ -89,7 +89,7 @@ public:
     int32_t AddAbilityRecordObserver(AbilityRecordObserver *observer);
     int32_t RemoveAbilityRecordObserver(AbilityRecordObserver *observer);
 
-    uint32_t curTask_ = 0;
+    osThreadId_t curTask_ = nullptr;
 
 private:
     static uint16_t GenerateToken();

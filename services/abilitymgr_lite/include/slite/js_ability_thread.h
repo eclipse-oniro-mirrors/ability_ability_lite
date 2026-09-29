@@ -34,12 +34,17 @@ public:
 
     osMessageQueueId_t GetMessageQueueId() const override;
 
-    UINT32 GetAppTaskId() const override;
+    osThreadId_t GetAppTaskId() const override;
 
-    static void AppTaskHandler(UINT32 uwArg);
+    static void AppTaskHandler(void *argument);
 private:
+    int32_t CreateAppTask(bool &needUnlockKernel);
+
+    static bool ProcessMessage(AbilityThread *abilityThread, AbilityThread *&defaultAbilityThread,
+        SliteAbilityInnerMsg &innerMsg);
+
     osMessageQueueId_t messageQueueId_ = nullptr;
-    UINT32 appTaskId_ = 0;
+    osThreadId_t appTaskId_ = nullptr;
 };
 } // namespace AbilitySlite
 } // namespace OHOS

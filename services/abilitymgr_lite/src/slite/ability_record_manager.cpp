@@ -27,12 +27,11 @@
 #include "ability_manager_inner.h"
 #include "bms_helper.h"
 #include "bundle_manager.h"
-#include "cmsis_os.h"
+#include "cmsis_os2.h"
 #ifdef OHOS_DMS_ENABLED
 #include "dmsfwk_interface.h"
 #endif
 #include "js_ability_thread.h"
-#include "los_task.h"
 #ifdef OHOS_DMS_ENABLED
 #include "samgr_lite.h"
 #endif
@@ -67,7 +66,7 @@ void AbilityRecordManager::StartLauncher()
     record->token = LAUNCHER_TOKEN;
     record->isNativeApp = true;
     record->state = SCHEDULE_FOREGROUND;
-    record->taskId = LOS_CurTaskIDGet();
+    record->taskId = osThreadGetId();
     abilityList_.Add(record);
     (void)ScheduleLifecycleInner(record, SLITE_STATE_FOREGROUND);
 #else // define _MINI_MULTI_TASKS_

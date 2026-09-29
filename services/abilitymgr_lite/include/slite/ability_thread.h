@@ -18,7 +18,6 @@
 
 #include <cstdint>
 #include "cmsis_os2.h"
-#include "los_task.h"
 #include "slite_ability.h"
 
 extern "C" void LP_TaskBegin();
@@ -47,7 +46,7 @@ public:
 
     virtual osMessageQueueId_t GetMessageQueueId() const = 0;
 
-    virtual UINT32 GetAppTaskId() const = 0;
+    virtual osThreadId_t GetAppTaskId() const = 0;
 
     virtual int32_t SendScheduleMsgToAbilityThread(SliteAbilityInnerMsg &innerMsg);
 

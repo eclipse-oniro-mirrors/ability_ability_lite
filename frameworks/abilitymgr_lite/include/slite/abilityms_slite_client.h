@@ -18,6 +18,7 @@
 
 #include "ability_service_interface.h"
 #include "ability_record_observer.h"
+#include "cmsis_os2.h"
 #include "mission_info.h"
 #include "nocopyable.h"
 #include "want.h"
@@ -26,7 +27,7 @@ namespace OHOS {
 namespace AbilitySlite {
 struct StartAbilityData {
     Want *want = nullptr;
-    uint32_t curTask = 0;
+    osThreadId_t curTask = nullptr;
 };
 
 class AbilityMsClient {
