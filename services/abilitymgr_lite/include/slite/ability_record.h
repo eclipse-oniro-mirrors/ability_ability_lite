@@ -18,7 +18,7 @@
 
 #include "ability_info.h"
 #include "ability_saved_data.h"
-#include "cmsis_os.h"
+#include "cmsis_os2.h"
 #include "ability_thread.h"
 #include "ability_record_state.h"
 
@@ -51,7 +51,7 @@ public:
     AbilitySavedData *abilitySavedData = nullptr;
     AbilityThread *abilityThread = nullptr;
     osMessageQueueId_t jsAppQueueId = nullptr;
-    uint32_t taskId = 0;
+    osThreadId_t taskId = nullptr;
     uint16_t token = 0;
     uint32_t mission = 0;
     uint8_t state = SCHEDULE_STOP;
